@@ -1,0 +1,17 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "labels": ["renovate", "dependencies"],
+  "extends": [
+    "config:base",
+    "group:definitelyTyped",
+    "group:linters",
+    "group:test",
+    ":dependencyDashboard",
+    ":rebaseStalePrs",
+    ":prNotPending",
+    ":maintainLockFilesWeekly",
+    ":automergePatch"
+  ],
+  "branchConcurrentLimit": 20,
+  "stabilityDays": 3
+}
