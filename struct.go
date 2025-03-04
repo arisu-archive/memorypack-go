@@ -27,15 +27,15 @@ type Formatter interface {
 	Deserialize(reader *Reader) error
 }
 
-// SerializeStruct serializes a struct to the writer.
-func SerializeStruct(writer *Writer, value interface{}) error {
+// serializeStruct serializes a struct to the writer.
+func serializeStruct(writer *Writer, value interface{}) error {
 	v := reflect.ValueOf(value)
 	if v.Kind() == reflect.Ptr {
 		v = v.Elem()
 	}
 
 	if v.Kind() != reflect.Struct {
-		return fmt.Errorf("SerializeStruct only accepts struct values")
+		return fmt.Errorf("serializeStruct only accepts struct values")
 	}
 
 	t := v.Type()
@@ -57,16 +57,16 @@ func SerializeStruct(writer *Writer, value interface{}) error {
 	return nil
 }
 
-// DeserializeStruct deserializes a struct from the reader.
-func DeserializeStruct(reader *Reader, value interface{}) error {
+// deserializeStruct deserializes a struct from the reader.
+func deserializeStruct(reader *Reader, value interface{}) error {
 	v := reflect.ValueOf(value)
 	if v.Kind() != reflect.Ptr {
-		return fmt.Errorf("DeserializeStruct requires a pointer to a struct")
+		return fmt.Errorf("deserializeStruct requires a pointer to a struct")
 	}
 
 	v = v.Elem()
 	if v.Kind() != reflect.Struct {
-		return fmt.Errorf("DeserializeStruct requires a pointer to a struct")
+		return fmt.Errorf("deserializeStruct requires a pointer to a struct")
 	}
 
 	t := v.Type()
@@ -231,7 +231,7 @@ func writeValue(writer *Writer, v reflect.Value) error {
 			}
 		}
 	case reflect.Struct:
-		return SerializeStruct(writer, v.Interface())
+		return serializeStruct(writer, v.Interface())
 	case reflect.Ptr:
 		if !v.IsNil() {
 			return writeValue(writer, v.Elem())
@@ -368,7 +368,7 @@ func readValue(reader *Reader, v reflect.Value) error {
 
 		v.Set(mapValue)
 	case reflect.Struct:
-		return DeserializeStruct(reader, v.Addr().Interface())
+		return deserializeStruct(reader, v.Addr().Interface())
 	case reflect.Ptr:
 		b, err := reader.Peek(1)
 		if err != nil {

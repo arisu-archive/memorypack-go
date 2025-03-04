@@ -26,7 +26,7 @@ func Serialize(value any) ([]byte, error) {
 			v = v.Elem()
 		}
 		if v.Kind() == reflect.Struct {
-			if err := SerializeStruct(writer, v.Interface()); err != nil {
+			if err := serializeStruct(writer, v.Interface()); err != nil {
 				return nil, err
 			}
 		} else {

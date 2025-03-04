@@ -33,7 +33,7 @@ func Deserialize[T any](data []byte, value T) error {
 	v = v.Elem()
 
 	if v.Kind() == reflect.Struct {
-		if err := DeserializeStruct(reader, value); err != nil {
+		if err := deserializeStruct(reader, value); err != nil {
 			return err
 		}
 	} else {
