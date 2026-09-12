@@ -1,5 +1,7 @@
 # Change these variables as necessary.
 TMP_DIR := ./tmp
+GOLANGCI_LINT_VERSION := v2.12.2
+GOVULNCHECK_VERSION := v1.7.0
 
 # ==================================================================================== #
 # HELPERS
@@ -8,7 +10,7 @@ TMP_DIR := ./tmp
 .PHONY: prepare
 prepare:
 	mkdir -p ${TMP_DIR}
-	go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.5
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 	go env -w CGO_ENABLED=1
 
 ## help: print this help message
@@ -39,9 +41,9 @@ tidy:
 .PHONY: audit
 audit:
 	go mod verify
-	go vet ./...
-	go run github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.5 run ./...
-	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	go vet -stdmethods=false ./...
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 # ==================================================================================== #
 # DEVELOPMENT

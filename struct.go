@@ -1,469 +1,396 @@
 package memorypack
 
 import (
+	"cmp"
+	"errors"
 	"fmt"
+	"math"
 	"reflect"
-	"sort"
+	"slices"
 	"strconv"
-	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
-var formatterCache sync.Map // map[reflect.Type]formatterData
+//nolint:gochecknoglobals // Type metadata is shared process-wide and immutable once published under the mutex.
+var formatterCache = struct {
+	mu   sync.RWMutex
+	data map[reflect.Type]formatterData
+}{data: make(map[reflect.Type]formatterData)}
 
 type formatterData struct {
-	fields []fieldInfo
+	fields          []fieldInfo
+	versionTolerant bool
+	memberCount     int
+	err             error
 }
 
 type fieldInfo struct {
 	index int
-	kind  reflect.Kind
 	name  string
 	order int
 }
 
-type Formatter interface {
-	Serialize(writer *Writer) error
-	Deserialize(reader *Reader) error
-}
-
-// serializeStruct serializes a struct to the writer.
-func serializeStruct(writer *Writer, value interface{}) error {
-	v := reflect.ValueOf(value)
-	if v.Kind() == reflect.Ptr {
-		v = v.Elem()
+func serializeStruct(w *Writer, v reflect.Value) error {
+	fd := getFormatterData(v.Type())
+	if fd.err != nil {
+		return fd.err
 	}
-
-	if v.Kind() != reflect.Struct {
-		return fmt.Errorf("serializeStruct only accepts struct values")
+	if fd.versionTolerant {
+		return writeVersionTolerant(w, v, fd)
 	}
-
-	t := v.Type()
-	fd := getFormatterData(t)
-
-	// Write object header with field count
-	if err := writer.WriteObjectHeader(len(fd.fields)); err != nil {
+	if err := w.WriteObjectHeader(len(fd.fields)); err != nil {
 		return err
 	}
-
-	// Write each field
 	for _, field := range fd.fields {
-		fieldValue := v.Field(field.index)
-		if err := writeValue(writer, fieldValue); err != nil {
-			return err
+		if err := writeValue(w, v.Field(field.index)); err != nil {
+			return fmt.Errorf("%s.%s: %w", v.Type(), field.name, err)
 		}
 	}
-
 	return nil
 }
 
-// deserializeStruct deserializes a struct from the reader.
-func deserializeStruct(reader *Reader, value interface{}) error {
-	v := reflect.ValueOf(value)
-	if v.Kind() != reflect.Ptr {
-		return fmt.Errorf("deserializeStruct requires a pointer to a struct")
+func deserializeStruct(r *Reader, v reflect.Value) error {
+	fd := getFormatterData(v.Type())
+	if fd.err != nil {
+		return fd.err
 	}
-
-	v = v.Elem()
-	if v.Kind() != reflect.Struct {
-		return fmt.Errorf("deserializeStruct requires a pointer to a struct")
-	}
-
-	t := v.Type()
-	fd := getFormatterData(t)
-
-	// Read object header
-	fieldCount, isNull, err := reader.ReadObjectHeader()
+	count, isNull, err := r.ReadObjectHeader()
 	if err != nil {
 		return err
 	}
-
 	if isNull {
-		// Cannot set struct to null, just return
+		v.SetZero()
 		return nil
 	}
-
-	// Verify field count matches
-	if fieldCount != len(fd.fields) {
-		return fmt.Errorf("field count mismatch during deserialization")
+	if fd.versionTolerant {
+		return readVersionTolerant(r, v, fd, count)
 	}
-
-	// Read each field
-	for _, field := range fd.fields {
-		fieldValue := v.Field(field.index)
-		if fieldValue.CanSet() {
-			if err = readValue(reader, fieldValue); err != nil {
-				return err
-			}
-		} else {
-			// Skip over this field in the data
-			if err = skipValue(reader, field.kind); err != nil {
-				return err
-			}
+	if count > len(fd.fields) {
+		return fmt.Errorf("field count %d exceeds %s schema with %d fields", count, v.Type(), len(fd.fields))
+	}
+	for i, field := range fd.fields {
+		value := v.Field(field.index)
+		if i >= count {
+			continue
+		}
+		if err = readValue(r, value); err != nil {
+			return fmt.Errorf("%s.%s: %w", v.Type(), field.name, err)
 		}
 	}
-
 	return nil
 }
 
-// getFormatterData gets or creates formatter data for a type.
 func getFormatterData(t reflect.Type) formatterData {
-	if cachedData, found := formatterCache.Load(t); found {
-		return cachedData.(formatterData)
+	formatterCache.mu.RLock()
+	cached, found := formatterCache.data[t]
+	formatterCache.mu.RUnlock()
+	if found {
+		return cached
 	}
-
 	fd := createFormatterData(t)
-	formatterCache.Store(t, fd)
+	formatterCache.mu.Lock()
+	defer formatterCache.mu.Unlock()
+	if existing, loaded := formatterCache.data[t]; loaded {
+		return existing
+	}
+	formatterCache.data[t] = fd
 	return fd
 }
 
-// createFormatterData creates formatter data for a type.
 func createFormatterData(t reflect.Type) formatterData {
 	fd := formatterData{
-		fields: make([]fieldInfo, 0, t.NumField()),
+		versionTolerant: reflect.PointerTo(t).Implements(reflect.TypeFor[VersionTolerant]()),
 	}
-
-	for i := 0; i < t.NumField(); i++ {
+	for i := range t.NumField() {
 		field := t.Field(i)
-		if field.PkgPath != "" {
-			// Skip unexported fields
-			continue
-		}
-
-		// Check tag for order
-		order := i
 		tag := field.Tag.Get("memorypack")
-		if tag != "" && tag != "-" {
-			parts := strings.Split(tag, ",")
-			if orderStr := parts[0]; orderStr != "" {
-				if parsedOrder, err := strconv.Atoi(orderStr); err == nil {
-					order = parsedOrder
-				}
-			}
-		}
-
-		// Skip fields that are not tagged or tagged with '-'
-		if tag == "-" {
+		if field.PkgPath != "" || tag == "-" {
 			continue
 		}
-
-		fd.fields = append(fd.fields, fieldInfo{
-			index: i,
-			kind:  field.Type.Kind(),
-			name:  field.Name,
-			order: order,
-		})
+		order := i
+		if tag != "" {
+			parsed, err := strconv.Atoi(tag)
+			if err != nil || parsed < 0 {
+				fd.err = fmt.Errorf("invalid memorypack order %q on %s.%s", tag, t, field.Name)
+				return fd
+			}
+			order = parsed
+		} else if fd.versionTolerant {
+			fd.err = fmt.Errorf("version-tolerant field %s.%s requires an explicit memorypack order", t, field.Name)
+			return fd
+		}
+		fd.fields = append(fd.fields, fieldInfo{index: i, name: field.Name, order: order})
 	}
-
-	// Sort fields by the specified order
-	sort.Slice(fd.fields, func(i, j int) bool {
-		return fd.fields[i].order < fd.fields[j].order
-	})
-
+	slices.SortFunc(fd.fields, func(a, b fieldInfo) int { return cmp.Compare(a.order, b.order) })
+	for i, field := range fd.fields {
+		if i > 0 && fd.fields[i-1].order == field.order {
+			fd.err = fmt.Errorf("duplicate memorypack order %d on %s", field.order, t)
+			return fd
+		}
+	}
+	fd.memberCount = len(fd.fields)
+	if fd.versionTolerant && len(fd.fields) > 0 {
+		last := fd.fields[len(fd.fields)-1].order
+		if last >= int(WideTag)-1 {
+			fd.err = fmt.Errorf("version-tolerant order %d exceeds 248", last)
+			return fd
+		}
+		fd.memberCount = last + 1
+	}
+	if fd.memberCount >= int(WideTag) {
+		fd.err = fmt.Errorf("too many fields in %s: %d (max 249)", t, fd.memberCount)
+	}
 	return fd
 }
 
-// writeValue handles writing any reflected value.
-func writeValue(writer *Writer, v reflect.Value) error {
-	if err := writer.CheckDepth(); err != nil {
+func writeValue(w *Writer, v reflect.Value) error {
+	if err := w.CheckDepth(); err != nil {
 		return err
 	}
-	defer writer.EndCheckDepth()
+	defer w.EndCheckDepth()
+	if !v.IsValid() {
+		w.WriteByte(NullObject)
+		return nil
+	}
+	if v.Kind() == reflect.Interface {
+		return writeUnion(w, v)
+	}
+	if marshaler, ok := marshalerFor(v); ok {
+		if v.Kind() == reflect.Pointer && v.IsNil() {
+			return fmt.Errorf("nil custom value %s requires an explicit nullable representation", v.Type())
+		}
+		if err := marshaler.MarshalMemoryPack(w); err != nil {
+			return fmt.Errorf("custom serialize %s: %w", v.Type(), err)
+		}
+		return nil
+	}
+	if scalarSize(v.Kind()) != 0 {
+		writeScalar(w, v)
+		return nil
+	}
 	switch v.Kind() {
-	case reflect.Bool:
-		writer.WriteBool(v.Bool())
-	case reflect.Int8:
-		writer.WriteByte(byte(v.Int()))
-	case reflect.Int16:
-		writer.WriteInt16(int16(v.Int()))
-	case reflect.Int32:
-		writer.WriteInt32(int32(v.Int()))
-	case reflect.Int, reflect.Int64:
-		writer.WriteInt64(v.Int())
-	case reflect.Float32:
-		writer.WriteFloat32(float32(v.Float()))
-	case reflect.Float64:
-		writer.WriteFloat64(v.Float())
 	case reflect.String:
-		writer.WriteString(v.String())
-	case reflect.Slice:
-		if v.IsNil() {
-			writer.WriteNullCollectionHeader()
-			return nil
+		if !utf8.ValidString(v.String()) || v.Len() > math.MaxInt32 {
+			return errors.New("invalid or oversized UTF-8 string")
 		}
+		w.WriteString(v.String())
+		return nil
+	case reflect.Struct:
+		return serializeStruct(w, v)
+	case reflect.Pointer:
+		return writePointer(w, v)
+	case reflect.Slice, reflect.Array, reflect.Map:
+		return writeCollection(w, v)
+	default:
+		return fmt.Errorf("unsupported type: %s", v.Type())
+	}
+}
 
-		if v.Type().Elem().Kind() == reflect.Uint8 {
-			// []byte has special treatment
-			writer.WriteBytes(v.Bytes())
-		} else {
-			// Other slices
-			writer.WriteCollectionHeader(v.Len())
-			for i := 0; i < v.Len(); i++ {
-				if err := writeValue(writer, v.Index(i)); err != nil {
-					return err
-				}
-			}
+func writePointer(w *Writer, v reflect.Value) error {
+	element := v.Type().Elem()
+	if scalarSize(element.Kind()) != 0 {
+		value := reflect.Zero(element)
+		if !v.IsNil() {
+			value = v.Elem()
 		}
-	case reflect.Array:
-		length := v.Len()
-		writer.WriteCollectionHeader(length)
-		for i := range length {
-			if err := writeValue(writer, v.Index(i)); err != nil {
+		writeNullable(w, value, !v.IsNil())
+		return nil
+	}
+	if v.IsNil() {
+		switch element.Kind() {
+		case reflect.String, reflect.Slice, reflect.Map:
+			w.WriteNullCollectionHeader()
+		default:
+			w.WriteByte(NullObject)
+		}
+		return nil
+	}
+	return writeValue(w, v.Elem())
+}
+
+func writeCollection(w *Writer, v reflect.Value) error {
+	if isNilValue(v) {
+		w.WriteNullCollectionHeader()
+		return nil
+	}
+	if v.Kind() == reflect.Slice && v.Type().Elem() == reflect.TypeFor[byte]() {
+		if v.Len() > math.MaxInt32 {
+			return errors.New("byte array exceeds int32 length")
+		}
+		w.WriteBytes(v.Bytes())
+		return nil
+	}
+	if v.Len() > math.MaxInt32 {
+		return fmt.Errorf("collection length %d exceeds int32", v.Len())
+	}
+	w.WriteCollectionHeader(v.Len())
+	if v.Kind() == reflect.Map {
+		iter := v.MapRange()
+		for iter.Next() {
+			if err := writeValue(w, iter.Key()); err != nil {
+				return err
+			}
+			if err := writeValue(w, iter.Value()); err != nil {
 				return err
 			}
 		}
-	case reflect.Map:
-		if v.IsNil() {
-			writer.WriteNullCollectionHeader()
-			return nil
+		return nil
+	}
+	for i := range v.Len() {
+		if err := writeValue(w, v.Index(i)); err != nil {
+			return fmt.Errorf("element %d: %w", i, err)
 		}
-
-		writer.WriteCollectionHeader(v.Len())
-		if v.Len() > 0 {
-			iter := v.MapRange()
-			for iter.Next() {
-				if err := writeValue(writer, iter.Key()); err != nil {
-					return err
-				}
-				if err := writeValue(writer, iter.Value()); err != nil {
-					return err
-				}
-			}
-		}
-	case reflect.Struct:
-		return serializeStruct(writer, v.Interface())
-	case reflect.Ptr:
-		if !v.IsNil() {
-			return writeValue(writer, v.Elem())
-		}
-		writer.WriteByte(NullObject)
-	default:
-		return fmt.Errorf("unsupported type: %s", v.Kind())
 	}
 	return nil
 }
 
-// readValue handles reading any reflected value.
-func readValue(reader *Reader, v reflect.Value) error {
+func readValue(r *Reader, v reflect.Value) error {
+	if r.depth >= MaxDepth {
+		return fmt.Errorf("deserialization depth exceeded %d", MaxDepth)
+	}
+	r.depth++
+	defer func() { r.depth-- }()
+	if v.Kind() == reflect.Interface {
+		return readUnion(r, v)
+	}
+	if unmarshaler, ok := unmarshalerFor(v); ok {
+		if err := unmarshaler.UnmarshalMemoryPack(r); err != nil {
+			return fmt.Errorf("custom deserialize %s: %w", v.Type(), err)
+		}
+		return nil
+	}
+	if scalarSize(v.Kind()) != 0 {
+		return readScalar(r, v)
+	}
 	switch v.Kind() {
-	case reflect.Bool:
-		val, err := reader.ReadBool()
-		if err != nil {
-			return err
-		}
-		v.SetBool(val)
-	case reflect.Int8:
-		val, err := reader.ReadByte()
-		if err != nil {
-			return err
-		}
-		v.SetInt(int64(val))
-	case reflect.Int16:
-		val, err := reader.ReadInt16()
-		if err != nil {
-			return err
-		}
-		v.SetInt(int64(val))
-	case reflect.Int32:
-		val, err := reader.ReadInt32()
-		if err != nil {
-			return err
-		}
-		v.SetInt(int64(val))
-	case reflect.Int, reflect.Int64:
-		val, err := reader.ReadInt64()
-		if err != nil {
-			return err
-		}
-		v.SetInt(val)
-	case reflect.Float32:
-		val, err := reader.ReadFloat32()
-		if err != nil {
-			return err
-		}
-		v.SetFloat(float64(val))
-	case reflect.Float64:
-		val, err := reader.ReadFloat64()
-		if err != nil {
-			return err
-		}
-		v.SetFloat(val)
 	case reflect.String:
-		val, err := reader.ReadString()
-		if err != nil {
-			return err
+		value, err := r.ReadString()
+		if err == nil {
+			v.SetString(value)
 		}
-		v.SetString(val)
-	case reflect.Slice:
-		if v.Type().Elem().Kind() == reflect.Uint8 {
-			// []byte has special treatment
-			bytes, err := reader.ReadBytes()
-			if err != nil {
-				return err
-			}
-			v.SetBytes(bytes)
-		} else {
-			// Other slices
-			length, isNull, err := reader.ReadCollectionHeader()
-			if err != nil {
-				return err
-			}
-			if isNull {
-				v.Set(reflect.Zero(v.Type()))
-				return nil
-			}
-
-			slice := reflect.MakeSlice(v.Type(), length, length)
-			for i := range length {
-				if err = readValue(reader, slice.Index(i)); err != nil {
-					return err
-				}
-			}
-			v.Set(slice)
-		}
-	case reflect.Array:
-		length, isNull, err := reader.ReadCollectionHeader()
-		if err != nil {
-			return err
-		}
-		if isNull {
-			// Can't set nil to array, so skip
-			return nil
-		}
-
-		for i := range length {
-			if err = readValue(reader, v.Index(i)); err != nil {
-				return err
-			}
-		}
-	case reflect.Map:
-		length, isNull, err := reader.ReadCollectionHeader()
-		if err != nil {
-			return err
-		}
-		if isNull {
-			v.Set(reflect.Zero(v.Type()))
-			return nil
-		}
-
-		mapType := v.Type()
-		mapValue := reflect.MakeMapWithSize(mapType, length)
-
-		for range length {
-			keyType := mapType.Key()
-			valueType := mapType.Elem()
-
-			key := reflect.New(keyType).Elem()
-			value := reflect.New(valueType).Elem()
-
-			if err = readValue(reader, key); err != nil {
-				return err
-			}
-			if err = readValue(reader, value); err != nil {
-				return err
-			}
-
-			mapValue.SetMapIndex(key, value)
-		}
-
-		v.Set(mapValue)
+		return err
 	case reflect.Struct:
-		return deserializeStruct(reader, v.Addr().Interface())
-	case reflect.Ptr:
-		b, err := reader.Peek(1)
-		if err != nil {
-			return err
-		}
-		if b[0] == NullObject {
-			// Consume the null marker
-			if _, err = reader.ReadByte(); err != nil {
-				return err
-			}
-			// Set to nil
-			v.Set(reflect.Zero(v.Type()))
-			return nil
-		}
-		// Object with members
+		return deserializeStruct(r, v)
+	case reflect.Pointer:
+		return readPointer(r, v)
+	case reflect.Slice, reflect.Array, reflect.Map:
+		return readCollection(r, v)
+	default:
+		return fmt.Errorf("unsupported type: %s", v.Type())
+	}
+}
+
+func readPointer(r *Reader, v reflect.Value) error {
+	if v.Type().Implements(reflect.TypeFor[Unmarshaler]()) {
 		if v.IsNil() {
 			v.Set(reflect.New(v.Type().Elem()))
 		}
-		return readValue(reader, v.Elem())
-	default:
-		return fmt.Errorf("unsupported type: %s", v.Kind())
+		return readValue(r, v.Elem())
 	}
+	element := v.Type().Elem()
+	if scalarSize(element.Kind()) != 0 {
+		value := reflect.New(element)
+		present, err := readNullable(r, value.Elem())
+		if err != nil {
+			return err
+		}
+		if present {
+			v.Set(value)
+		} else {
+			v.SetZero()
+		}
+		return nil
+	}
+	var width int
+	switch element.Kind() {
+	case reflect.String, reflect.Slice, reflect.Map:
+		width = int32Size
+	default:
+		width = 1
+	}
+	marker, err := r.Peek(width)
+	if err != nil {
+		return err
+	}
+	isNull := true
+	for _, b := range marker {
+		isNull = isNull && b == NullObject
+	}
+	if isNull {
+		r.pos += width
+		v.SetZero()
+		return nil
+	}
+	if v.IsNil() {
+		v.Set(reflect.New(element))
+	}
+	return readValue(r, v.Elem())
+}
+
+func readCollection(r *Reader, v reflect.Value) error {
+	if v.Kind() == reflect.Slice && v.Type().Elem() == reflect.TypeFor[byte]() {
+		data, err := r.ReadBytes()
+		if err == nil {
+			v.SetBytes(data)
+		}
+		return err
+	}
+	length, isNull, err := r.ReadCollectionHeader()
+	if err != nil {
+		return err
+	}
+	if isNull {
+		v.SetZero()
+		return nil
+	}
+	if v.Kind() == reflect.Map {
+		return readMap(r, v, length)
+	}
+	if v.Kind() == reflect.Array {
+		if length != v.Len() {
+			return fmt.Errorf("array length %d does not match %s", length, v.Type())
+		}
+		for i := range length {
+			if err = readValue(r, v.Index(i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	// Grow only after a value has been decoded; an untrusted count must not
+	// allocate the complete destination before its payload has been checked.
+	result := reflect.MakeSlice(v.Type(), 0, 0)
+	for i := range length {
+		element := reflect.New(v.Type().Elem()).Elem()
+		if err = readValue(r, element); err != nil {
+			return fmt.Errorf("element %d: %w", i, err)
+		}
+		result = reflect.Append(result, element)
+	}
+	v.Set(result)
 	return nil
 }
 
-// skipValue skips over a value in the reader.
-func skipValue(reader *Reader, kind reflect.Kind) error {
-	switch kind {
-	case reflect.Bool, reflect.Int8, reflect.Uint8:
-		_, err := reader.ReadByte()
-		return err
-	case reflect.Int16, reflect.Uint16:
-		_, err := reader.ReadInt16()
-		return err
-	case reflect.Int32, reflect.Uint32, reflect.Float32:
-		_, err := reader.ReadInt32()
-		return err
-	case reflect.Int64, reflect.Uint64, reflect.Float64:
-		_, err := reader.ReadInt64()
-		return err
-	case reflect.String:
-		_, err := reader.ReadString()
-		return err
-	case reflect.Slice, reflect.Array:
-		length, isNull, err := reader.ReadCollectionHeader()
-		if err != nil {
+func readMap(r *Reader, v reflect.Value, length int) error {
+	result := reflect.MakeMap(v.Type())
+	for range length {
+		key := reflect.New(v.Type().Key()).Elem()
+		value := reflect.New(v.Type().Elem()).Elem()
+		if err := readValue(r, key); err != nil {
 			return err
 		}
-		if !isNull {
-			for range length {
-				// Assuming int32 elements for simple skipping
-				if _, err = reader.ReadInt32(); err != nil {
-					return err
-				}
-			}
+		if !key.Comparable() {
+			return errors.New("decoded map key is not comparable")
 		}
-		return nil
-	case reflect.Map:
-		length, isNull, err := reader.ReadCollectionHeader()
-		if err != nil {
+		if result.MapIndex(key).IsValid() {
+			return errors.New("duplicate map key")
+		}
+		if err := readValue(r, value); err != nil {
 			return err
 		}
-		if !isNull {
-			for range length {
-				// Skip key and value (assuming strings for simplicity)
-				if _, err = reader.ReadString(); err != nil {
-					return err
-				}
-				_, err = reader.ReadString()
-				if err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	case reflect.Struct:
-		// Skip object header
-		_, isNull, err := reader.ReadObjectHeader()
-		if err != nil {
-			return err
-		}
-		if !isNull {
-			return fmt.Errorf("skipping struct fields not fully implemented")
-		}
-		return nil
-	case reflect.Ptr:
-		header, err := reader.ReadByte()
-		if err != nil {
-			return err
-		}
-		if header != NullObject {
-			return fmt.Errorf("skipping pointer values not fully implemented")
-		}
-		return nil
-	default:
-		return fmt.Errorf("skipping unsupported type: %s", kind)
+		result.SetMapIndex(key, value)
 	}
+	v.Set(result)
+	return nil
 }

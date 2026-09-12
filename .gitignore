@@ -397,3 +397,7 @@ $RECYCLE.BIN/
 
 # Ignore tmp folder
 tmp/
+
+# C# compatibility fixture build output
+testdata/csharp/bin/
+testdata/csharp/obj/
