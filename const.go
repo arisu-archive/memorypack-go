@@ -20,4 +20,17 @@ const (
 
 	// Depth constants.
 	MaxDepth = 1000
+
+	// DefaultCollectionLimit bounds element-wise decoding work. A Reader's
+	// CollectionLimit can be raised for larger trusted collections. Byte slices
+	// are instead bounded by the input buffer because they need no element loop.
+	DefaultCollectionLimit = 1 << 20
+)
+
+const (
+	int16Size             = 2
+	int32Size             = 4
+	int64Size             = 8
+	bitsPerByte           = 8
+	initialWriterCapacity = 128
 )

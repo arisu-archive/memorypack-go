@@ -297,14 +297,14 @@ type CustomFormat struct {
 }
 
 // Implement the Formatter interface for CustomFormat.
-func (c *CustomFormat) Serialize(writer *memorypack.Writer) error {
+func (c *CustomFormat) MarshalMemoryPack(writer *memorypack.Writer) error {
 	// Custom serialization logic
 	writer.WriteInt32(int32(c.IntValue))
 	writer.WriteString(c.StrValue)
 	return nil
 }
 
-func (c *CustomFormat) Deserialize(reader *memorypack.Reader) error {
+func (c *CustomFormat) UnmarshalMemoryPack(reader *memorypack.Reader) error {
 	// Custom deserialization logic
 	val, err := reader.ReadInt32()
 	if err != nil {
@@ -448,14 +448,14 @@ func TestEdgeAndCornerCases(t *testing.T) {
 
 	t.Run("MaxValues", func(t *testing.T) {
 		testRoundTrip(t, math.MaxInt32)
-		testRoundTrip(t, math.MaxInt64)
+		testRoundTrip(t, int64(math.MaxInt64))
 		testRoundTrip(t, math.MaxFloat32)
 		testRoundTrip(t, math.MaxFloat64)
 	})
 
 	t.Run("MinValues", func(t *testing.T) {
 		testRoundTrip(t, math.MinInt32)
-		testRoundTrip(t, math.MinInt64)
+		testRoundTrip(t, int64(math.MinInt64))
 		testRoundTrip(t, -math.MaxFloat32)
 		testRoundTrip(t, -math.MaxFloat64)
 	})
