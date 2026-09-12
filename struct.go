@@ -1,11 +1,12 @@
 package memorypack
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
 	"reflect"
-	"sort"
+	"slices"
 	"strconv"
 	"sync"
 	"unicode/utf8"
@@ -121,7 +122,7 @@ func createFormatterData(t reflect.Type) formatterData {
 		}
 		fd.fields = append(fd.fields, fieldInfo{index: i, name: field.Name, order: order})
 	}
-	sort.Slice(fd.fields, func(i, j int) bool { return fd.fields[i].order < fd.fields[j].order })
+	slices.SortFunc(fd.fields, func(a, b fieldInfo) int { return cmp.Compare(a.order, b.order) })
 	for i, field := range fd.fields {
 		if i > 0 && fd.fields[i-1].order == field.order {
 			fd.err = fmt.Errorf("duplicate memorypack order %d on %s", field.order, t)
@@ -156,7 +157,7 @@ func writeValue(w *Writer, v reflect.Value) error {
 		return writeUnion(w, v)
 	}
 	if marshaler, ok := marshalerFor(v); ok {
-		if v.Kind() == reflect.Ptr && v.IsNil() {
+		if v.Kind() == reflect.Pointer && v.IsNil() {
 			return fmt.Errorf("nil custom value %s requires an explicit nullable representation", v.Type())
 		}
 		if err := marshaler.MarshalMemoryPack(w); err != nil {
@@ -177,7 +178,7 @@ func writeValue(w *Writer, v reflect.Value) error {
 		return nil
 	case reflect.Struct:
 		return serializeStruct(w, v)
-	case reflect.Ptr:
+	case reflect.Pointer:
 		return writePointer(w, v)
 	case reflect.Slice, reflect.Array, reflect.Map:
 		return writeCollection(w, v)
@@ -271,7 +272,7 @@ func readValue(r *Reader, v reflect.Value) error {
 		return err
 	case reflect.Struct:
 		return deserializeStruct(r, v)
-	case reflect.Ptr:
+	case reflect.Pointer:
 		return readPointer(r, v)
 	case reflect.Slice, reflect.Array, reflect.Map:
 		return readCollection(r, v)

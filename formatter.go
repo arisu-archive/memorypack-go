@@ -28,7 +28,7 @@ func marshalerFor(v reflect.Value) (Marshaler, bool) {
 			return m, true
 		}
 	}
-	if v.Kind() == reflect.Ptr || !reflect.PointerTo(v.Type()).Implements(reflect.TypeFor[Marshaler]()) {
+	if v.Kind() == reflect.Pointer || !reflect.PointerTo(v.Type()).Implements(reflect.TypeFor[Marshaler]()) {
 		return nil, false
 	}
 	if !v.CanAddr() {

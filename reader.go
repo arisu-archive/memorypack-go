@@ -51,7 +51,7 @@ func (r *Reader) ReadFormatVersion() (byte, error) {
 // ReadByte reads a byte from the buffer.
 func (r *Reader) ReadByte() (byte, error) {
 	if r.pos >= len(r.buffer) {
-		return 0, fmt.Errorf("cannot read byte: end of buffer")
+		return 0, errors.New("cannot read byte: end of buffer")
 	}
 
 	v := r.buffer[r.pos]
@@ -98,37 +98,37 @@ func (r *Reader) ReadBytes() ([]byte, error) {
 // ReadInt16 reads an int16 from the buffer.
 func (r *Reader) ReadInt16() (int16, error) {
 	if r.pos+2 > len(r.buffer) {
-		return 0, fmt.Errorf("cannot read int16: end of buffer")
+		return 0, errors.New("cannot read int16: end of buffer")
 	}
 	v := binary.LittleEndian.Uint16(r.buffer[r.pos:])
 	r.pos += 2
-	return int16(v), nil
+	return int16(v), nil //nolint:gosec // Reinterpret the signed wire bits without changing their representation.
 }
 
 // ReadInt32 reads an int32 from the buffer.
 func (r *Reader) ReadInt32() (int32, error) {
 	if r.pos+4 > len(r.buffer) {
-		return 0, fmt.Errorf("cannot read int32: end of buffer")
+		return 0, errors.New("cannot read int32: end of buffer")
 	}
 	v := binary.LittleEndian.Uint32(r.buffer[r.pos:])
 	r.pos += 4
-	return int32(v), nil
+	return int32(v), nil //nolint:gosec // Reinterpret the signed wire bits without changing their representation.
 }
 
 // ReadInt64 reads an int64 from the buffer.
 func (r *Reader) ReadInt64() (int64, error) {
 	if r.pos+8 > len(r.buffer) {
-		return 0, fmt.Errorf("cannot read int64: end of buffer")
+		return 0, errors.New("cannot read int64: end of buffer")
 	}
 	v := binary.LittleEndian.Uint64(r.buffer[r.pos:])
 	r.pos += 8
-	return int64(v), nil
+	return int64(v), nil //nolint:gosec // Reinterpret the signed wire bits without changing their representation.
 }
 
 // ReadFloat32 reads a float32 from the buffer.
 func (r *Reader) ReadFloat32() (float32, error) {
 	if r.pos+4 > len(r.buffer) {
-		return 0, fmt.Errorf("cannot read float32: end of buffer")
+		return 0, errors.New("cannot read float32: end of buffer")
 	}
 	v := binary.LittleEndian.Uint32(r.buffer[r.pos:])
 	r.pos += 4
@@ -138,7 +138,7 @@ func (r *Reader) ReadFloat32() (float32, error) {
 // ReadFloat64 reads a float64 from the buffer.
 func (r *Reader) ReadFloat64() (float64, error) {
 	if r.pos+8 > len(r.buffer) {
-		return 0, fmt.Errorf("cannot read float64: end of buffer")
+		return 0, errors.New("cannot read float64: end of buffer")
 	}
 	v := binary.LittleEndian.Uint64(r.buffer[r.pos:])
 	r.pos += 8
@@ -258,7 +258,7 @@ func (r *Reader) ReadRaw(length int) ([]byte, error) {
 // for concurrent use, and its input must not be mutated during decoding.
 func (r *Reader) ReadValue(value any) error {
 	v := reflect.ValueOf(value)
-	if !v.IsValid() || v.Kind() != reflect.Ptr || v.IsNil() {
+	if !v.IsValid() || v.Kind() != reflect.Pointer || v.IsNil() {
 		return errors.New("deserialize requires a non-nil pointer to a value")
 	}
 	return readValue(r, v.Elem())

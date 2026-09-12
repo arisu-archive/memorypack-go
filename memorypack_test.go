@@ -124,7 +124,7 @@ func TestCollectionTypes(t *testing.T) {
 
 		// Large map
 		largeMap := make(map[int]int, 1000)
-		for i := 0; i < 1000; i++ {
+		for i := range 1000 {
 			largeMap[i] = i * i
 		}
 		testRoundTrip(t, largeMap)
@@ -283,7 +283,7 @@ func TestPointers(t *testing.T) {
 		}
 
 		if result.Other == nil {
-			t.Errorf("Other should not be nil")
+			t.Error("Other should not be nil")
 		} else if result.Other.Name != "B" {
 			t.Errorf("Expected name 'B', got '%s'", result.Other.Name)
 		}

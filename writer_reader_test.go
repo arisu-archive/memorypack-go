@@ -155,7 +155,7 @@ func TestWriter(t *testing.T) {
 		writer := memorypack.NewWriter(2)
 
 		// Write enough bytes to trigger capacity increase
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			writer.WriteByte(byte(i))
 		}
 
@@ -165,7 +165,7 @@ func TestWriter(t *testing.T) {
 			t.Errorf("Expected 100 bytes, got %d", len(bytes))
 		}
 
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			if bytes[i] != byte(i) {
 				t.Errorf("Expected byte %d at index %d, got %d", i, i, bytes[i])
 			}

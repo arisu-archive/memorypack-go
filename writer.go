@@ -108,6 +108,8 @@ func (w *Writer) WriteByte(v byte) {
 }
 
 // WriteBytes writes a byte slice to the buffer.
+// Direct callers must keep the byte length within math.MaxInt32. WriteValue
+// checks that bound and returns an error for oversized slices.
 func (w *Writer) WriteBytes(v []byte) {
 	if v == nil {
 		// Null byte array
@@ -116,7 +118,7 @@ func (w *Writer) WriteBytes(v []byte) {
 	}
 
 	// Write the length
-	w.WriteInt32(int32(len(v)))
+	w.WriteInt32(int32(len(v))) //nolint:gosec // The caller must satisfy WriteBytes' documented int32 length bound.
 
 	// Write the bytes
 	if len(v) > 0 {
@@ -129,21 +131,21 @@ func (w *Writer) WriteBytes(v []byte) {
 // WriteInt16 writes an int16 to the buffer.
 func (w *Writer) WriteInt16(v int16) {
 	w.ensureCapacity(2)
-	binary.LittleEndian.PutUint16(w.buffer[w.pos:], uint16(v))
+	binary.LittleEndian.PutUint16(w.buffer[w.pos:], uint16(v)) //nolint:gosec // Preserve the signed wire bits.
 	w.pos += 2
 }
 
 // WriteInt32 writes an int32 to the buffer.
 func (w *Writer) WriteInt32(v int32) {
 	w.ensureCapacity(4)
-	binary.LittleEndian.PutUint32(w.buffer[w.pos:], uint32(v))
+	binary.LittleEndian.PutUint32(w.buffer[w.pos:], uint32(v)) //nolint:gosec // Preserve the signed wire bits.
 	w.pos += 4
 }
 
 // WriteInt64 writes an int64 to the buffer.
 func (w *Writer) WriteInt64(v int64) {
 	w.ensureCapacity(8)
-	binary.LittleEndian.PutUint64(w.buffer[w.pos:], uint64(v))
+	binary.LittleEndian.PutUint64(w.buffer[w.pos:], uint64(v)) //nolint:gosec // Preserve the signed wire bits.
 	w.pos += 8
 }
 
@@ -192,7 +194,7 @@ func (w *Writer) WriteString(v string) {
 	w.ensureCapacity(utf8ByteCount + 8) // data + 2 headers
 
 	// Write negated UTF-8 byte count (~utf8-byte-count)
-	w.WriteInt32(^int32(utf8ByteCount))
+	w.WriteInt32(^int32(utf8ByteCount)) //nolint:gosec // WriteString's documented precondition bounds the byte count.
 
 	// UTF-16 code units cannot outnumber UTF-8 bytes under WriteString's preconditions.
 	w.WriteInt32(int32(utf16Length(v))) //nolint:gosec // WriteValue bounds the byte length to int32.
@@ -227,7 +229,7 @@ func utf16Length(value string) int {
 // Custom formatters can use it to encode nested values on the current writer.
 func (w *Writer) WriteValue(value any) error {
 	v := reflect.ValueOf(value)
-	if v.IsValid() && v.Kind() == reflect.Ptr && !v.IsNil() {
+	if v.IsValid() && v.Kind() == reflect.Pointer && !v.IsNil() {
 		if _, ok := value.(Marshaler); !ok {
 			v = v.Elem()
 		}
@@ -276,8 +278,10 @@ func (w *Writer) WriteUnionHeader(tag uint16) {
 func (w *Writer) WriteNullUnionHeader() { w.WriteByte(NullObject) }
 
 // WriteCollectionHeader writes a collection header (used for arrays, lists, etc).
+// The caller must supply NullCollection or a length from zero to math.MaxInt32.
+// WriteValue validates collection lengths before calling this low-level method.
 func (w *Writer) WriteCollectionHeader(length int) {
-	w.WriteInt32(int32(length))
+	w.WriteInt32(int32(length)) //nolint:gosec // The caller must satisfy the documented int32 length bound.
 }
 
 // WriteNullCollectionHeader writes a null collection header.
